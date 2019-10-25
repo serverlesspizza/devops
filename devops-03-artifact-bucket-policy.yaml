@@ -1,0 +1,41 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates policy for S3 build artifact bucket
+Parameters:
+  DevAccount:
+    Description: AWS AccountNumber for Development
+    Type: Number
+  ProductionAccount:
+    Description: AWS AccountNumber for Production
+    Type: Number
+Resources:
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Fn::ImportValue: "ArtifactBucket"
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Effect: Allow
+            Resource:
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - Fn::ImportValue: "ArtifactBucket"
+              - !Join
+                - ''
+                - - 'arn:aws:s3:::'
+                  - Fn::ImportValue: "ArtifactBucket"
+                  - '/*'
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${ProductionAccount}:role/devopsAccountCodePipelineCFRole
+                - !Sub arn:aws:iam::${ProductionAccount}:role/cloudformationdeployer-role
+                - !Sub arn:aws:iam::${DevAccount}:role/devopsAccountCodePipelineCFRole
+                - !Sub arn:aws:iam::${DevAccount}:role/cloudformationdeployer-role
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/codepipeline-Role
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/codebuild-Role

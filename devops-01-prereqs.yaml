@@ -1,0 +1,249 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates PreReqs for Cloudformation Projects with Pipelines (KMS, Buckets, Repos...)
+Parameters:
+  DevOpsAccount:
+    Description: AWS AccountNumber for DevOps
+    Type: Number
+  DevAccount:
+    Description: AWS AccountNumber for Development
+    Type: Number
+  ProductionAccount:
+    Description: AWS AccountNumber for Production
+    Type: Number
+Resources:
+  KMSKey:
+    DependsOn: PipeLineRole
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Used by Assumed Roles in Dev/Prod accounts to Encrypt/Decrypt code
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: KeyPolicy
+        Statement:
+          -
+            Sid: Allows admin of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+          -
+            Sid: Allow use of the key for CryptoGraphy Lambda
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${ProductionAccount}:root
+                - !Sub arn:aws:iam::${DevAccount}:root
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/codepipeline-Role
+                - !Sub arn:aws:iam::${AWS::AccountId}:role/codebuild-Role
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+  KMSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/xaccounts
+      TargetKeyId: !Ref KMSKey
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !Sub ${AWS::AccountId}-pipeline-artifacts-${AWS::Region}
+      VersioningConfiguration:
+        Status: Enabled
+  BuildProjectRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: codebuild-Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+  BuildProjectPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: codebuild-Policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetBucketPolicy
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !Sub arn:aws:s3:::${ArtifactBucket}/*
+              - !Sub arn:aws:s3:::${ArtifactBucket}
+          -
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource: !GetAtt KMSKey.Arn
+          -
+            Sid: ssm
+            Effect: Allow
+            Action:
+              - ssm:GetParameters
+            Resource: "*"
+          -
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          -
+            Sid: cloudformation
+            Effect: Allow
+            Action:
+              - cloudformation:ValidateTemplate
+            Resource: !Sub 'arn:aws:cloudformation:${AWS::Region}:*'
+      Roles:
+        -
+          !Ref BuildProjectRole
+  PipeLineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: codepipeline-Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+  PipelinePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: codepipeline-Policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Sid: codebuild
+            Effect: Allow
+            Action:
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuilds
+            Resource:
+              - !GetAtt BuildProject.Arn
+          -
+            Sid: general
+            Effect: Allow
+            Action:
+              - iam:ListRoles
+              - iam:PassRole
+            Resource:
+              - !Sub "arn:aws:iam::${AWS::AccountId}:*"
+          -
+            Sid: kms
+            Effect: Allow
+            Action:
+              - kms:Decrypt
+            Resource: !GetAtt KMSKey.Arn
+          -
+            Sid: s3
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+            Resource:
+              - !Sub arn:aws:s3:::${ArtifactBucket}/*
+              - !Sub arn:aws:s3:::${ArtifactBucket}
+          -
+            Sid: iam
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !Sub arn:aws:iam::${ProductionAccount}:role/devopsAccountCodePipelineCFRole
+              - !Sub arn:aws:iam::${DevAccount}:role/devopsAccountCodePipelineCFRole
+      Roles:
+        -
+          !Ref PipeLineRole
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: BuildProject
+      Description: BuildProject
+      EncryptionKey: !GetAtt KMSKey.Arn
+      ServiceRole: !GetAtt BuildProjectRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: !Ref ArtifactBucket
+      Source:
+        Type: CODEPIPELINE
+Outputs:
+  ArtifactBucket:
+    Value: !Sub ${AWS::AccountId}-pipeline-artifacts-${AWS::Region}
+    Export:
+      Name: ArtifactBucket
+  CMK:
+    Value: !GetAtt KMSKey.Arn
+    Export:
+      Name: KMSKeyArn
+  DevAccount:
+    Value: !Ref DevAccount
+    Export:
+      Name: Dev-account
+  ProductionAccount:
+    Value: !Ref ProductionAccount
+    Export:
+      Name: Prod-account
+  PipeLineRole:
+    Value: !GetAtt PipeLineRole.Arn
+    Export:
+      Name: PipeLineRoleArn
+  Devcloudformationdeployer:
+    Value: !Sub arn:aws:iam::${DevAccount}:role/cloudformationdeployer-role
+    Export:
+      Name: DevCloudFormationDeployerRole
+  Productioncloudformationdeployer:
+    Value: !Sub arn:aws:iam::${ProductionAccount}:role/cloudformationdeployer-role
+    Export:
+      Name: ProdCloudFormationDeployerRole
+  DevCodePipelineCloudFormationRole:
+    Value: !Sub arn:aws:iam::${DevAccount}:role/devopsAccountCodePipelineCFRole
+    Export:
+      Name: DevDevOpsAccountCodePipelineCFRole
+  ProductionCodePipelineCloudFormationRole:
+    Value: !Sub arn:aws:iam::${ProductionAccount}:role/devopsAccountCodePipelineCFRole
+    Export:
+      Name: ProdDevOpsAccountCodePipelineCFRole
